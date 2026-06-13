@@ -1,6 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Store } from "./store.js";
+import type { MemoryNode } from "./types.js";
+import { extractEntities } from "./extraction.js";
 
 const LinkSchema = z.object({
   target: z.string().describe("Target node ID"),
@@ -19,6 +21,16 @@ const NodeInputSchema = z.object({
   content: z.string().describe("Node content in markdown"),
   links: z.array(LinkSchema).optional().describe("Typed links to other nodes"),
 });
+
+interface ScoredNode {
+  node: MemoryNode;
+  similarity: number;
+  keywordScore: number;
+  entityOverlap: number;
+  recency: number;
+  inDegree: number;
+  finalScore: number;
+}
 
 export function registerTools(server: McpServer, store: Store): void {
   server.tool(
@@ -61,7 +73,7 @@ export function registerTools(server: McpServer, store: Store): void {
 
   server.tool(
     "commit_task",
-    "Persist what future tasks need into the graph and clear the scratchpad. Call when the current task is complete. Atomic: nodes are written before the scratchpad is cleared.",
+    "Persist what future tasks need into the graph and clear the scratchpad. Call when the current task is complete. Atomic: nodes are written before the scratchpad is cleared. Runs entity extraction, embedding, and derived-edge generation on committed nodes.",
     {
       session_id: z.string().describe("The current session ID"),
       residue: z.object({
@@ -75,11 +87,15 @@ export function registerTools(server: McpServer, store: Store): void {
     async ({ session_id, residue }) => {
       const result = store.commitTask(session_id, residue);
       const ids = result.nodes.map((n) => n.id);
+
+      // Enrich committed nodes (extraction + embeddings + derived edges)
+      await store.enrichAfterCommit(ids);
+
       return {
         content: [
           {
             type: "text" as const,
-            text: `Task committed. ${result.nodes.length} node(s) persisted [${ids.join(", ")}]. Scratchpad archived and cleared.`,
+            text: `Task committed. ${result.nodes.length} node(s) persisted [${ids.join(", ")}], enriched with entities and embeddings. Scratchpad archived and cleared.`,
           },
         ],
       };
@@ -88,7 +104,7 @@ export function registerTools(server: McpServer, store: Store): void {
 
   server.tool(
     "read_subgraph",
-    "Return the task-relevant neighborhood of the graph. Seeds by keyword match, expands one hop via edges, trims to a token budget.",
+    "Return the task-relevant neighborhood of the graph. Seeds by semantic similarity (when embeddings are available) and keyword match. Expands along typed edges weighted by relationship type. Ranks by similarity, recency, connectivity, and entity overlap. Trims to a token budget.",
     {
       task: z.string().describe("Description of the current task"),
       budget: z
@@ -98,38 +114,9 @@ export function registerTools(server: McpServer, store: Store): void {
         .describe("Approximate token budget for the returned subgraph"),
     },
     async ({ task, budget }) => {
-      const seeds = store.searchNodes(task);
+      const scored = await rankSubgraph(store, task);
 
-      // Expand one hop from seeds
-      const seen = new Set<string>();
-      const expanded: typeof seeds = [];
-      for (const node of seeds) {
-        if (!seen.has(node.id)) {
-          seen.add(node.id);
-          expanded.push(node);
-        }
-        for (const neighbor of store.getNodeNeighbors(node.id)) {
-          if (!seen.has(neighbor.id)) {
-            seen.add(neighbor.id);
-            expanded.push(neighbor);
-          }
-        }
-      }
-
-      // Trim to budget (~4 chars per token)
-      const charBudget = budget * 4;
-      let totalChars = 0;
-      const included: typeof expanded = [];
-
-      for (const node of expanded) {
-        const nodeText = formatNode(node);
-        if (totalChars + nodeText.length > charBudget && included.length > 0)
-          break;
-        included.push(node);
-        totalChars += nodeText.length;
-      }
-
-      if (included.length === 0) {
+      if (scored.length === 0) {
         return {
           content: [
             {
@@ -140,12 +127,26 @@ export function registerTools(server: McpServer, store: Store): void {
         };
       }
 
+      // Trim to budget (~4 chars per token)
+      const charBudget = budget * 4;
+      let totalChars = 0;
+      const included: ScoredNode[] = [];
+
+      for (const entry of scored) {
+        const nodeText = formatNode(entry);
+        if (totalChars + nodeText.length > charBudget && included.length > 0)
+          break;
+        included.push(entry);
+        totalChars += nodeText.length;
+      }
+
       const text = included.map(formatNode).join("\n\n---\n\n");
+      const trimmed = scored.length - included.length;
       return {
         content: [
           {
             type: "text" as const,
-            text: `Found ${included.length} relevant node(s) (${expanded.length - included.length} trimmed by budget):\n\n${text}`,
+            text: `Found ${included.length} relevant node(s)${trimmed > 0 ? ` (${trimmed} trimmed by budget)` : ""}:\n\n${text}`,
           },
         ],
       };
@@ -153,18 +154,128 @@ export function registerTools(server: McpServer, store: Store): void {
   );
 }
 
-function formatNode(n: {
-  id: string;
-  title: string;
-  type: string;
-  status: string;
-  updated: string;
-  links: Array<{ target: string; type: string }>;
-  content: string;
-}): string {
+async function rankSubgraph(
+  store: Store,
+  task: string
+): Promise<ScoredNode[]> {
+  const candidates = new Map<string, ScoredNode>();
+  const now = Date.now();
+
+  function addCandidate(node: MemoryNode, overrides?: Partial<ScoredNode>) {
+    if (candidates.has(node.id)) {
+      const existing = candidates.get(node.id)!;
+      if (overrides?.similarity)
+        existing.similarity = Math.max(existing.similarity, overrides.similarity);
+      if (overrides?.keywordScore)
+        existing.keywordScore = Math.max(existing.keywordScore, overrides.keywordScore);
+      if (overrides?.entityOverlap)
+        existing.entityOverlap = Math.max(existing.entityOverlap, overrides.entityOverlap);
+      return;
+    }
+    const updatedMs = new Date(node.updated).getTime();
+    const ageHours = Math.max(1, (now - updatedMs) / 3_600_000);
+    const recency = 1 / (1 + Math.log2(ageHours));
+
+    candidates.set(node.id, {
+      node,
+      similarity: 0,
+      keywordScore: 0,
+      entityOverlap: 0,
+      recency,
+      inDegree: 0,
+      finalScore: 0,
+      ...overrides,
+    });
+  }
+
+  // Signal 1: Semantic similarity (if embeddings available)
+  const semanticResults = await store.semanticSearch(task, 15);
+  for (const { node, similarity } of semanticResults) {
+    addCandidate(node, { similarity });
+  }
+
+  // Signal 2: Keyword match
+  const keywordResults = store.searchNodes(task, 15);
+  const keywords = task
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((k) => k.length > 2);
+  for (const node of keywordResults) {
+    const text = `${node.title} ${node.content}`.toLowerCase();
+    let hits = 0;
+    for (const k of keywords) {
+      if (text.includes(k)) hits++;
+    }
+    const keywordScore = keywords.length > 0 ? hits / keywords.length : 0;
+    addCandidate(node, { keywordScore });
+  }
+
+  // Signal 3: Entity overlap
+  const taskEntities = extractEntities(task);
+  if (taskEntities.length > 0) {
+    const seen = new Set<string>();
+    for (const entity of taskEntities) {
+      const nodes = store.findNodesByEntity(entity.name);
+      for (const node of nodes) {
+        if (!seen.has(node.id)) {
+          seen.add(node.id);
+          const nodeEntities = store.getNodeEntities(node.id);
+          const overlap =
+            taskEntities.filter((te) =>
+              nodeEntities.some(
+                (ne) => ne.name.toLowerCase() === te.name.toLowerCase()
+              )
+            ).length / taskEntities.length;
+          addCandidate(node, { entityOverlap: overlap });
+        }
+      }
+    }
+  }
+
+  // Expand one hop from seed nodes along weighted edges
+  const seeds = [...candidates.keys()];
+  for (const seedId of seeds) {
+    const seedScore = candidates.get(seedId)!;
+    const neighbors = store.getNodeNeighbors(seedId);
+    for (const { node, weight } of neighbors) {
+      const propagated = seedScore.finalScore * weight * 0.5;
+      addCandidate(node, { similarity: propagated });
+    }
+  }
+
+  // Compute in-degree for all candidates
+  let maxInDegree = 1;
+  for (const [id, entry] of candidates) {
+    entry.inDegree = store.getInDegree(id);
+    maxInDegree = Math.max(maxInDegree, entry.inDegree);
+  }
+
+  // Compute final score: weighted combination
+  for (const entry of candidates.values()) {
+    const normInDegree = entry.inDegree / maxInDegree;
+    entry.finalScore =
+      0.35 * entry.similarity +
+      0.25 * entry.keywordScore +
+      0.15 * entry.entityOverlap +
+      0.15 * entry.recency +
+      0.10 * normInDegree;
+  }
+
+  return [...candidates.values()]
+    .filter((e) => e.finalScore > 0.01)
+    .sort((a, b) => b.finalScore - a.finalScore);
+}
+
+function formatNode(entry: ScoredNode): string {
+  const n = entry.node;
+  const entities = entry.entityOverlap > 0 ? " [entity match]" : "";
+  const sim =
+    entry.similarity > 0
+      ? ` [similarity: ${(entry.similarity * 100).toFixed(0)}%]`
+      : "";
   const links =
     n.links.length > 0
       ? `\nLinks: ${n.links.map((l) => `${l.type} → ${l.target}`).join(", ")}`
       : "";
-  return `## ${n.title}\n- id: ${n.id}\n- type: ${n.type}\n- updated: ${n.updated}${links}\n\n${n.content}`;
+  return `## ${n.title}${sim}${entities}\n- id: ${n.id}\n- type: ${n.type}\n- updated: ${n.updated}\n- score: ${(entry.finalScore * 100).toFixed(1)}${links}\n\n${n.content}`;
 }

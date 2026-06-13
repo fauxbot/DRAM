@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-DRAM (Durable Recall for Agent Memory) — a persistent graph-memory layer for AI agents that survives context-window compaction. Phase 1 is implemented: MCP server skeleton with four tools + two HTTP routes, backed by markdown files and SQLite.
+DRAM (Durable Recall for Agent Memory) — a persistent graph-memory layer for AI agents that survives context-window compaction. Through Phase 2: MCP server with four tools + two HTTP routes, entity/claim extraction, derived edges, optional embeddings via Ollama, and multi-signal subgraph retrieval.
 
 ## Build and run
 
@@ -20,11 +20,13 @@ npm run rebuild-index  # re-derive SQLite from markdown files
 
 - `server/src/` — MCP memory server (TypeScript)
   - `index.ts` — entry point, starts MCP + HTTP
-  - `store.ts` — storage layer: scratchpads, markdown nodes, SQLite index
-  - `tools.ts` — MCP tool definitions (restore, checkpoint, commit_task, read_subgraph)
+  - `store.ts` — storage layer: scratchpads, markdown nodes, SQLite index, enrichment pipeline
+  - `tools.ts` — MCP tool definitions with multi-signal ranking in read_subgraph
   - `http.ts` — HTTP routes for hook access
   - `types.ts` — shared type definitions
-  - `rebuild-index.ts` — CLI to re-derive index from markdown files
+  - `embeddings.ts` — pluggable embedding providers (Ollama, Noop)
+  - `extraction.ts` — entity and claim extraction from node content
+  - `rebuild-index.ts` — CLI to re-derive index and enrichments from markdown files
 - `pre-compact.sh` — PreCompact hook for Claude Code
 - `session-start.sh` — SessionStart hook for Claude Code
 - `settings.json` — hook registration template
@@ -41,3 +43,6 @@ npm run rebuild-index  # re-derive SQLite from markdown files
 
 - `DRAM_DATA_DIR` — data directory (default `~/.dram/`)
 - `DRAM_HTTP_PORT` — HTTP port (default `3577`)
+- `DRAM_EMBEDDING_PROVIDER` — `ollama` (default) or `none`
+- `DRAM_OLLAMA_URL` — Ollama API URL (default `http://localhost:11434`)
+- `DRAM_EMBEDDING_MODEL` — embedding model (default `nomic-embed-text`)

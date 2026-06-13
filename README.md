@@ -56,8 +56,8 @@ See [SETUP.md](SETUP.md) for details.
 |---|---|
 | `restore(session_id)` | Return current scratchpad for this session |
 | `checkpoint(session_id, state)` | Save distilled working state |
-| `commit_task(session_id, residue)` | Persist nodes to graph, archive and clear scratchpad |
-| `read_subgraph(task, budget?)` | Retrieve relevant graph neighborhood by keyword + edge expansion |
+| `commit_task(session_id, residue)` | Persist nodes to graph, run entity extraction and embedding, archive and clear scratchpad |
+| `read_subgraph(task, budget?)` | Retrieve relevant graph neighborhood ranked by similarity, keywords, entity overlap, recency, and connectivity |
 
 ## HTTP API
 
@@ -73,10 +73,17 @@ See [SETUP.md](SETUP.md) for details.
 |---|---|---|
 | `DRAM_DATA_DIR` | `~/.dram/` | Where nodes, scratchpads, and the index live |
 | `DRAM_HTTP_PORT` | `3577` | HTTP API port |
+| `DRAM_EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama` or `none` |
+| `DRAM_OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL |
+| `DRAM_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model for embeddings |
 
 ## How it works
 
-Each memory node is a markdown file with YAML frontmatter: id, type, status, timestamps, and typed edges. SQLite indexes these for search. If the index gets corrupted, `npm run rebuild-index` re-derives it from the markdown files on disk.
+Each memory node is a markdown file with YAML frontmatter: id, type, status, timestamps, and typed edges (`depends_on`, `part_of`, `supersedes`, `relates_to`). SQLite indexes the nodes for search. If the index gets corrupted, `npm run rebuild-index` re-derives it from the markdown files on disk.
+
+When a node is committed, DRAM extracts entities (code identifiers, file paths, technical terms) and claims (declarative sentences) from its content. Nodes that share entities automatically get derived edges connecting them — this catches relationships the agent forgot to link explicitly. If Ollama is running, node content is also embedded for semantic similarity search.
+
+`read_subgraph` ranks candidates using multiple signals: embedding similarity, keyword matches, entity overlap with the query, recency, and in-degree (how many other nodes link to it). It seeds from the top matches, expands one hop along edges weighted by relationship type, and trims to a token budget.
 
 Three memory tiers:
 
@@ -92,9 +99,9 @@ The protocol the agent follows:
 
 ## Status
 
-Phase 1 is implemented: MCP server skeleton with all four tools, HTTP API, markdown + SQLite storage, keyword-based subgraph retrieval with one-hop edge expansion.
+Phase 2 is implemented: entity/claim extraction, derived edges from entity co-occurrence, optional embedding via Ollama, and multi-signal `read_subgraph` ranking (similarity + keywords + entity overlap + recency + in-degree).
 
-Still to come: embedding-based semantic retrieval, entity/claim extraction, community summaries, maintenance/cleanup handler, multi-surface support (Claude app, API with context editing).
+Still to come: community detection and hierarchical summaries, maintenance/cleanup handler (importance scoring, demote/archive, edge repair), multi-surface support (Claude app, API with context editing).
 
 ## License
 

@@ -5,15 +5,20 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Store } from "./store.js";
 import { registerTools } from "./tools.js";
 import { createHttpServer } from "./http.js";
+import { detectProvider } from "./embeddings.js";
 
 const DATA_DIR = process.env.DRAM_DATA_DIR || undefined;
 const HTTP_PORT = parseInt(process.env.DRAM_HTTP_PORT || "3577", 10);
 
 const store = new Store(DATA_DIR);
 
+// Detect and configure embedding provider before starting MCP
+const embedder = await detectProvider();
+store.setEmbeddingProvider(embedder);
+
 const mcpServer = new McpServer({
   name: "dram",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 registerTools(mcpServer, store);
