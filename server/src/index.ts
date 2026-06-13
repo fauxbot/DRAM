@@ -1,50 +1,57 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Store } from "./store.js";
-import { registerTools } from "./tools.js";
-import { createHttpServer } from "./http.js";
+import { createHttpServer, closeAllTransports } from "./http.js";
 import { detectProvider } from "./embeddings.js";
+import { createMcpServer, getTransportMode } from "./transport.js";
+import { isAuthEnabled } from "./auth.js";
 
 const DATA_DIR = process.env.DRAM_DATA_DIR || undefined;
 const HTTP_PORT = parseInt(process.env.DRAM_HTTP_PORT || "3577", 10);
+const HTTP_HOST = process.env.DRAM_HTTP_HOST || "127.0.0.1";
+const mode = getTransportMode();
 
 const store = new Store(DATA_DIR);
 
-// Detect and configure embedding provider before starting MCP
 const embedder = await detectProvider();
 store.setEmbeddingProvider(embedder);
 
-const mcpServer = new McpServer({
-  name: "dram",
-  version: "0.3.0",
-});
+process.stderr.write(
+  `dram: transport=${mode}, auth=${isAuthEnabled() ? "enabled" : "disabled"}\n`
+);
 
-registerTools(mcpServer, store);
-
-const httpServer = createHttpServer(store, HTTP_PORT);
+const enableMcp = mode === "http" || mode === "both";
+const httpServer = createHttpServer(store, HTTP_PORT, { enableMcp });
 httpServer.on("error", (err: NodeJS.ErrnoException) => {
   if (err.code === "EADDRINUSE") {
     process.stderr.write(
-      `dram: port ${HTTP_PORT} in use, HTTP API disabled (MCP still active)\n`
+      `dram: port ${HTTP_PORT} in use, HTTP API disabled\n`
     );
   } else {
     process.stderr.write(`dram: HTTP server error: ${err.message}\n`);
   }
 });
-httpServer.listen(HTTP_PORT, () => {
-  process.stderr.write(`dram HTTP server listening on port ${HTTP_PORT}\n`);
+httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
+  const features = enableMcp ? "MCP + HTTP API" : "HTTP API only";
+  process.stderr.write(
+    `dram: listening on ${HTTP_HOST}:${HTTP_PORT} (${features})\n`
+  );
 });
 
-const transport = new StdioServerTransport();
-await mcpServer.connect(transport);
-process.stderr.write("dram MCP server running on stdio\n");
+if (mode === "stdio" || mode === "both") {
+  const mcpServer = createMcpServer(store);
+  const transport = new StdioServerTransport();
+  await mcpServer.connect(transport);
+  process.stderr.write("dram: MCP server running on stdio\n");
+}
 
 function shutdown() {
-  store.close();
-  httpServer.close();
-  process.exit(0);
+  closeAllTransports().finally(() => {
+    store.close();
+    httpServer.close();
+    process.exit(0);
+  });
 }
 
 process.on("SIGINT", shutdown);
