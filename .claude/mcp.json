@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "dram": {
-      "command": "node",
-      "args": ["server/dist/index.js"],
-      "cwd": "${PROJECT_DIR}"
-    }
-  }
-}

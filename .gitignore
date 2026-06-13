@@ -6,8 +6,7 @@ dist/
 
 # Personal/conversation files — not part of the project
 HANDOFF.md
-.claude/state/
-.claude/settings.local.json
+.claude/
 .gmemory/
 .dram/
 
