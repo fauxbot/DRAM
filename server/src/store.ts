@@ -103,6 +103,14 @@ export class Store {
         PRIMARY KEY (source_id, target_id, type)
       );
 
+      CREATE TABLE IF NOT EXISTS maintenance_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        detail TEXT,
+        timestamp TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
       CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
       CREATE INDEX IF NOT EXISTS idx_nodes_updated ON nodes(updated);
@@ -113,6 +121,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_claims_node ON claims(node_id);
       CREATE INDEX IF NOT EXISTS idx_embeddings_ref ON embeddings(ref_type, ref_id);
       CREATE INDEX IF NOT EXISTS idx_derived_edges_target ON derived_edges(target_id);
+      CREATE INDEX IF NOT EXISTS idx_maintenance_log_action ON maintenance_log(action);
     `);
   }
 
@@ -640,6 +649,10 @@ export class Store {
       await this.enrichNode(row.id);
     }
     return rows.length;
+  }
+
+  getDb(): Database.Database {
+    return this.db;
   }
 
   close(): void {

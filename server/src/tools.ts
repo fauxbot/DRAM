@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Store } from "./store.js";
 import type { MemoryNode } from "./types.js";
 import { extractEntities } from "./extraction.js";
+import { MaintenanceHandler } from "./maintenance.js";
 
 const LinkSchema = z.object({
   target: z.string().describe("Target node ID"),
@@ -147,6 +148,34 @@ export function registerTools(server: McpServer, store: Store): void {
           {
             type: "text" as const,
             text: `Found ${included.length} relevant node(s)${trimmed > 0 ? ` (${trimmed} trimmed by budget)` : ""}:\n\n${text}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "maintain",
+    "Run the maintenance handler: score node importance, mark superseded nodes, demote stale leaves, repair dangling edges, detect communities and generate summary nodes. Safe and reversible — demotes and archives, never deletes.",
+    {},
+    async () => {
+      const handler = new MaintenanceHandler(store, store.getDb());
+      const result = await handler.run();
+
+      const lines = [
+        `Maintenance complete:`,
+        `- ${result.scored} nodes scored`,
+        `- ${result.supersessionMarked.length} marked superseded`,
+        `- ${result.demoted.length} stale leaves demoted`,
+        `- ${result.danglingEdgesRepaired} dangling edges repaired`,
+        `- ${result.communities} communities detected`,
+      ];
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: lines.join("\n"),
           },
         ],
       };

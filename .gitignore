@@ -7,6 +7,7 @@ dist/
 # Personal/conversation files — not part of the project
 HANDOFF.md
 .claude/
+.mcp.json
 .gmemory/
 .dram/
 

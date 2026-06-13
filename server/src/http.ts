@@ -1,5 +1,6 @@
 import http from "http";
 import type { Store } from "./store.js";
+import { MaintenanceHandler } from "./maintenance.js";
 
 export function createHttpServer(store: Store, port: number): http.Server {
   const server = http.createServer((req, res) => {
@@ -50,9 +51,21 @@ export function createHttpServer(store: Store, port: number): http.Server {
       return;
     }
 
+    if (req.method === "POST" && req.url === "/maintain") {
+      const handler = new MaintenanceHandler(store, store.getDb());
+      handler.run().then((result) => {
+        res.writeHead(200);
+        res.end(JSON.stringify(result));
+      }).catch((err) => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: (err as Error).message }));
+      });
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200);
-      res.end(JSON.stringify({ status: "ok", version: "0.1.0" }));
+      res.end(JSON.stringify({ status: "ok", version: "0.3.0" }));
       return;
     }
 

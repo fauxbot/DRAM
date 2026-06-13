@@ -18,12 +18,21 @@ store.setEmbeddingProvider(embedder);
 
 const mcpServer = new McpServer({
   name: "dram",
-  version: "0.2.0",
+  version: "0.3.0",
 });
 
 registerTools(mcpServer, store);
 
 const httpServer = createHttpServer(store, HTTP_PORT);
+httpServer.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    process.stderr.write(
+      `dram: port ${HTTP_PORT} in use, HTTP API disabled (MCP still active)\n`
+    );
+  } else {
+    process.stderr.write(`dram: HTTP server error: ${err.message}\n`);
+  }
+});
 httpServer.listen(HTTP_PORT, () => {
   process.stderr.write(`dram HTTP server listening on port ${HTTP_PORT}\n`);
 });

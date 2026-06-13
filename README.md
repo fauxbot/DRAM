@@ -58,6 +58,7 @@ See [SETUP.md](SETUP.md) for details.
 | `checkpoint(session_id, state)` | Save distilled working state |
 | `commit_task(session_id, residue)` | Persist nodes to graph, run entity extraction and embedding, archive and clear scratchpad |
 | `read_subgraph(task, budget?)` | Retrieve relevant graph neighborhood ranked by similarity, keywords, entity overlap, recency, and connectivity |
+| `maintain()` | Run the maintenance handler: score importance, mark superseded nodes, demote stale leaves, repair edges, detect communities |
 
 ## HTTP API
 
@@ -65,6 +66,7 @@ See [SETUP.md](SETUP.md) for details.
 |---|---|
 | `POST /checkpoint` | Record a pre-compaction snapshot (called by hooks) |
 | `GET /scratchpad?session_id=...` | Return scratchpad text (called by hooks) |
+| `POST /maintain` | Run the maintenance handler |
 | `GET /health` | Server status |
 
 ## Configuration
@@ -99,9 +101,9 @@ The protocol the agent follows:
 
 ## Status
 
-Phase 2 is implemented: entity/claim extraction, derived edges from entity co-occurrence, optional embedding via Ollama, and multi-signal `read_subgraph` ranking (similarity + keywords + entity overlap + recency + in-degree).
+Phase 3 is implemented. The maintenance handler scores node importance (recency, in-degree, out-degree, entity count), marks superseded nodes, demotes stale low-importance leaves, repairs dangling edges, and detects communities with auto-generated summary nodes. All actions are logged to an append-only maintenance log and are reversible (state transitions, never deletion).
 
-Still to come: community detection and hierarchical summaries, maintenance/cleanup handler (importance scoring, demote/archive, edge repair), multi-surface support (Claude app, API with context editing).
+Still to come: multi-surface support (Claude app via remote MCP connector, API with context-editing hardening), thrash avoidance, archive-then-GC tuning, and end-to-end eval.
 
 ## License
 
