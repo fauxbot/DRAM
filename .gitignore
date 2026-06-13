@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.db
+*.db-shm
+*.db-wal
+
+# Personal/conversation files — not part of the project
+HANDOFF.md
+.claude/
+.gmemory/
+.dram/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
