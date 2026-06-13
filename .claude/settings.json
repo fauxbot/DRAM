@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "MEMORY_SERVER_URL=http://localhost:3577 $CLAUDE_PROJECT_DIR/pre-compact.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/session-start.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

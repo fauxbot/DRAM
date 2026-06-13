@@ -39,6 +39,33 @@ npm run rebuild-index  # re-derive SQLite from markdown files
 3. Store distilled state, not transcripts.
 4. Never hard-delete — demote, supersede, or archive.
 
+## Working-memory protocol (always in effect)
+
+The DRAM MCP server is registered in `.claude/mcp.json`. Use its tools to
+persist state across compaction boundaries.
+
+1. **On start or resume** — call `restore(session_id)` first. Read
+   `.claude/state/scratchpad.md` as a fallback. Re-establish the task,
+   decisions already made, and current step before acting. Never re-plan
+   or re-derive something already recorded.
+
+2. **After each meaningful step** — call `checkpoint(session_id, state)`
+   with distilled state: the task as stated, decisions and why, current
+   progress, open questions, and hard constraints. Also update
+   `.claude/state/scratchpad.md` as a local backup. Keep it small enough
+   to reload in full. Overwrite current-state in place; for decisions,
+   append and mark anything reversed as superseded.
+
+3. **On task completion** — call `commit_task(session_id, residue)` to
+   persist what future tasks will need into the graph, then the scratchpad
+   is archived and cleared automatically.
+
+Use `read_subgraph(task)` at the start of a new task to load relevant
+context from the graph before beginning work.
+
+If you are ever unsure of the current state, stop and call `restore()`
+before continuing. Re-reading is cheap; acting on stale context is not.
+
 ## Environment variables
 
 - `DRAM_DATA_DIR` — data directory (default `~/.dram/`)
