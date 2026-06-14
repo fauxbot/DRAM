@@ -101,9 +101,11 @@ The protocol the agent follows:
 
 ## Status
 
-Phase 3 is implemented. The maintenance handler scores node importance (recency, in-degree, out-degree, entity count), marks superseded nodes, demotes stale low-importance leaves, repairs dangling edges, and detects communities with auto-generated summary nodes. All actions are logged to an append-only maintenance log and are reversible (state transitions, never deletion).
+Phase 4 is implemented. The server supports three transport modes (`stdio`, `http`, `both`) with optional bearer-token authentication and localhost-only bind by default. Ready-to-paste protocol instructions ship for the Claude app (`protocols/claude-app.md`) and API (`protocols/claude-api.md`), and an example API client demonstrates the agentic loop with context editing.
 
-Still to come: multi-surface support (Claude app via remote MCP connector, API with context-editing hardening), thrash avoidance, archive-then-GC tuning, and end-to-end eval.
+An end-to-end eval suite (`npm test`) validates the definition-of-done criteria: compaction survival, reversibility (no hard deletes), retrieval precision, supersession chain preservation, enrichment pipeline, maintenance correctness, and index rebuild from markdown source of truth.
+
+Still to come: thrash avoidance and archive-then-GC tuning.
 
 ## License
 

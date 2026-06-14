@@ -23,7 +23,7 @@ const NodeInputSchema = z.object({
   links: z.array(LinkSchema).optional().describe("Typed links to other nodes"),
 });
 
-interface ScoredNode {
+export interface ScoredNode {
   node: MemoryNode;
   similarity: number;
   keywordScore: number;
@@ -183,7 +183,7 @@ export function registerTools(server: McpServer, store: Store): void {
   );
 }
 
-async function rankSubgraph(
+export async function rankSubgraph(
   store: Store,
   task: string
 ): Promise<ScoredNode[]> {
