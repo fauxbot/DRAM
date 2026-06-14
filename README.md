@@ -26,16 +26,37 @@ npm run build
 npm start
 ```
 
-Starts an MCP interface on stdio and an HTTP API on port 3577.
+### Per-project (isolated memory)
 
-Register it in your project's `.claude/mcp.json`:
+Each project spawns its own DRAM process with a separate data directory. No port conflicts, no shared state between unrelated projects.
 
 ```json
 {
   "mcpServers": {
     "dram": {
       "command": "node",
-      "args": ["/absolute/path/to/server/dist/index.js"]
+      "args": ["/absolute/path/to/server/dist/index.js", "--data-dir", "~/.dram/my-project"]
+    }
+  }
+}
+```
+
+### Shared (cross-project memory)
+
+Run one DRAM server in HTTP mode, connect multiple projects to it. Projects share the same knowledge graph.
+
+Start the server:
+```
+DRAM_TRANSPORT=http node /path/to/server/dist/index.js
+```
+
+Then in each project's `.claude/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "dram": {
+      "type": "streamable-http",
+      "url": "http://localhost:3577/mcp"
     }
   }
 }
@@ -71,10 +92,12 @@ See [SETUP.md](SETUP.md) for details.
 
 ## Configuration
 
+CLI flag: `--data-dir <path>` overrides the data directory (supports `~`). Takes precedence over the env var.
+
 | Variable | Default | Description |
 |---|---|---|
 | `DRAM_DATA_DIR` | `~/.dram/` | Where nodes, scratchpads, and the index live |
-| `DRAM_HTTP_PORT` | `3577` | HTTP API port |
+| `DRAM_HTTP_PORT` | `3577` | HTTP API port (only used in `http` or `both` transport modes) |
 | `DRAM_EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama` or `none` |
 | `DRAM_OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL |
 | `DRAM_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model for embeddings |

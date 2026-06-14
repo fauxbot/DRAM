@@ -651,6 +651,10 @@ export class Store {
     return rows.length;
   }
 
+  getDataDir(): string {
+    return this.dataDir;
+  }
+
   getDb(): Database.Database {
     return this.db;
   }
