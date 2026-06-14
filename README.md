@@ -28,12 +28,13 @@ npm start
 
 ### Per-project (isolated memory)
 
-Each project spawns its own DRAM process with a separate data directory. No port conflicts, no shared state between unrelated projects.
+Each project spawns its own DRAM process with a separate data directory. No port conflicts, no shared state between unrelated projects. Create a `.mcp.json` in the project root (for VS Code extension) or `.claude/mcp.json` (for CLI):
 
 ```json
 {
   "mcpServers": {
     "dram": {
+      "type": "stdio",
       "command": "node",
       "args": ["/absolute/path/to/server/dist/index.js", "--data-dir", "~/.dram/my-project"]
     }
@@ -50,7 +51,7 @@ Start the server:
 DRAM_TRANSPORT=http node /path/to/server/dist/index.js
 ```
 
-Then in each project's `.claude/mcp.json`:
+Then in each project's `.mcp.json` (VS Code) or `.claude/mcp.json` (CLI):
 ```json
 {
   "mcpServers": {
