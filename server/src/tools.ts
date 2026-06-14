@@ -156,20 +156,33 @@ export function registerTools(server: McpServer, store: Store): void {
 
   server.tool(
     "maintain",
-    "Run the maintenance handler: score node importance, mark superseded nodes, demote stale leaves, repair dangling edges, detect communities and generate summary nodes. Safe and reversible — demotes and archives, never deletes.",
-    {},
-    async () => {
-      const handler = new MaintenanceHandler(store, store.getDb());
+    "Run the maintenance handler: score node importance, mark superseded nodes, demote stale leaves, repair dangling edges, detect communities and generate summary nodes. Safe and reversible — demotes and archives, never deletes. Use dry_run to preview what would change.",
+    {
+      dry_run: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Preview changes without applying them"),
+    },
+    async ({ dry_run }) => {
+      const handler = new MaintenanceHandler(store, store.getDb(), { dryRun: dry_run });
       const result = await handler.run();
 
       const lines = [
-        `Maintenance complete:`,
+        `Maintenance ${dry_run ? "preview" : "complete"}:`,
         `- ${result.scored} nodes scored`,
         `- ${result.supersessionMarked.length} marked superseded`,
         `- ${result.demoted.length} stale leaves demoted`,
         `- ${result.danglingEdgesRepaired} dangling edges repaired`,
         `- ${result.communities} communities detected`,
       ];
+
+      if (result.skippedDemotion.length > 0) {
+        lines.push(`- ${result.skippedDemotion.length} skipped demotion (type protection or too young)`);
+      }
+      if (result.cappedDemotion.length > 0) {
+        lines.push(`- ${result.cappedDemotion.length} deferred by per-run cap`);
+      }
 
       return {
         content: [

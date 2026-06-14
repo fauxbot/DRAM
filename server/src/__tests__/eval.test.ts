@@ -152,35 +152,38 @@ describe("compaction survival", () => {
 
 describe("reversibility", () => {
   it("maintenance demotes stale leaves to archived, never deletes files", async () => {
-    // Create a node and backdate it to make it stale (>7 days old)
+    // Create a note and backdate it
     const node = store.createNode({
       title: "Temporary debug note",
       type: "note",
       content: "Added console.log to trace the race condition in order processing.",
     });
 
-    // Manually backdate the node to 10 days ago
-    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 3600_000).toISOString();
-    store.getDb().prepare("UPDATE nodes SET updated = ? WHERE id = ?").run(tenDaysAgo, node.id);
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600_000).toISOString();
+    store.getDb().prepare("UPDATE nodes SET updated = ?, created = ? WHERE id = ?").run(thirtyDaysAgo, thirtyDaysAgo, node.id);
     const filePath = path.join(tmpDir, "nodes", `${node.id}.md`);
     const raw = fs.readFileSync(filePath, "utf-8");
-    fs.writeFileSync(filePath, raw.replace(node.updated, tenDaysAgo), "utf-8");
+    fs.writeFileSync(filePath, raw.replace(node.updated, thirtyDaysAgo), "utf-8");
 
-    // Run maintenance
+    // Simulate 10 active days so the note (7-day threshold) is eligible
+    for (let i = 0; i < 10; i++) {
+      const m = store.createNode({ title: `Activity ${i}`, type: "note", content: `Day ${i}` });
+      const created = new Date(Date.now() - (10 - i) * 24 * 3_600_000).toISOString();
+      store.getDb().prepare("UPDATE nodes SET created = ? WHERE id = ?").run(created, m.id);
+    }
+
     const handler = new MaintenanceHandler(store, store.getDb());
     const result = await handler.run();
 
-    // The node should be demoted (if scored low enough) but the file must still exist
+    // File must still exist regardless of demotion
     expect(fs.existsSync(filePath)).toBe(true);
 
-    // If demoted, verify status is "archived" not deleted
     if (result.demoted.includes(node.id)) {
       const archived = store.getNode(node.id);
       expect(archived).not.toBeNull();
       expect(archived!.status).toBe("archived");
     }
 
-    // Verify maintenance log recorded the action
     const logEntries = store
       .getDb()
       .prepare("SELECT * FROM maintenance_log WHERE node_id = ?")
@@ -622,6 +625,257 @@ describe("index rebuild", () => {
 });
 
 // ── 8. Scratchpad sizing ──────────────────────────────────────────
+
+// ── 8. Archive-then-GC tuning ─────────────────────────────────────
+
+describe("GC tuning", () => {
+  // Backdate a node's updated (and created) timestamp in both DB and markdown
+  function backdateNode(nodeId: string, hoursAgo: number) {
+    const when = new Date(Date.now() - hoursAgo * 3_600_000).toISOString();
+    store.getDb().prepare("UPDATE nodes SET updated = ?, created = ? WHERE id = ?").run(when, when, nodeId);
+    const filePath = path.join(tmpDir, "nodes", `${nodeId}.md`);
+    const raw = fs.readFileSync(filePath, "utf-8");
+    fs.writeFileSync(filePath, raw.replace(/updated: '[^']*'/, `updated: '${when}'`), "utf-8");
+  }
+
+  // Simulate N active days by inserting dummy nodes with distinct created dates
+  // starting from daysAgo and counting toward the present
+  function simulateActiveDays(count: number, startDaysAgo: number = count) {
+    for (let i = 0; i < count; i++) {
+      const daysBack = startDaysAgo - i;
+      const created = new Date(Date.now() - daysBack * 24 * 3_600_000).toISOString();
+      const n = store.createNode({
+        title: `Activity marker day ${i}`,
+        type: "note",
+        content: `Simulated activity on day ${daysBack}.`,
+      });
+      store.getDb().prepare("UPDATE nodes SET created = ? WHERE id = ?").run(created, n.id);
+    }
+  }
+
+  it("decisions survive longer than notes (active-day thresholds)", async () => {
+    // Create a note and a decision, both backdated far enough to be old
+    const note = store.createNode({
+      title: "Scratch note",
+      type: "note",
+      content: "Temporary thought about a debug session.",
+    });
+    const decision = store.createNode({
+      title: "Use connection pooling",
+      type: "decision",
+      content: "Decided to use pg-pool for connection pooling. Max 20 connections.",
+    });
+    backdateNode(note.id, 30 * 24);     // 30 days old
+    backdateNode(decision.id, 30 * 24); // 30 days old
+
+    // Simulate 10 active days since those nodes were created
+    // That's past the note threshold (7) but not the decision threshold (30)
+    simulateActiveDays(10);
+
+    const handler = new MaintenanceHandler(store, store.getDb());
+    const result = await handler.run();
+
+    // Note should be demoted (10 active days > 7 day note threshold)
+    expect(result.demoted).toContain(note.id);
+    // Decision should survive (10 active days < 30 day decision threshold)
+    expect(result.demoted).not.toContain(decision.id);
+    expect(result.skippedDemotion).toContain(decision.id);
+  });
+
+  it("community_summary nodes are never demoted", async () => {
+    const summary = store.createNode({
+      title: "Community: Auth, Sessions, Tokens",
+      type: "community_summary",
+      content: "Community of 3 related nodes about authentication.",
+    });
+    backdateNode(summary.id, 60 * 24);
+    simulateActiveDays(40);
+
+    const handler = new MaintenanceHandler(store, store.getDb());
+    const result = await handler.run();
+
+    expect(result.demoted).not.toContain(summary.id);
+    expect(result.skippedDemotion).toContain(summary.id);
+    expect(store.getNode(summary.id)!.status).toBe("active");
+  });
+
+  it("demotion is capped at 20% of active nodes per run", async () => {
+    const nodes: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const n = store.createNode({
+        title: `Stale note ${i}`,
+        type: "note",
+        content: `Old debug note number ${i}.`,
+      });
+      backdateNode(n.id, 30 * 24);
+      nodes.push(n.id);
+    }
+    // Enough active days to pass the note threshold
+    simulateActiveDays(10);
+
+    const handler = new MaintenanceHandler(store, store.getDb());
+    const result = await handler.run();
+
+    // 20% of active count — should cap demotions
+    expect(result.demoted.length).toBeLessThanOrEqual(
+      Math.max(1, Math.floor((10 + 10) * 0.2)) // 10 stale + 10 activity markers
+    );
+    expect(result.cappedDemotion.length).toBeGreaterThan(0);
+
+    // The rest are still active
+    const stillActive = nodes.filter((id) => store.getNode(id)!.status === "active");
+    expect(stillActive.length).toBeGreaterThan(0);
+  });
+
+  it("idle graph skips demotion entirely", async () => {
+    const note = store.createNode({
+      title: "Note on idle project",
+      type: "note",
+      content: "This project hasn't been touched in weeks.",
+    });
+    backdateNode(note.id, 30 * 24);
+
+    // First run: records run_complete (with activity markers to allow demotion)
+    simulateActiveDays(10);
+    const handler1 = new MaintenanceHandler(store, store.getDb());
+    await handler1.run();
+
+    // Second run: no new nodes since last run_complete → idle
+    const handler2 = new MaintenanceHandler(store, store.getDb());
+    const result = await handler2.run();
+
+    expect(result.demoted.length).toBe(0);
+    expect(result.log.some((l) => l.includes("graph is idle"))).toBe(true);
+  });
+
+  it("dry-run previews changes without applying them", async () => {
+    const old = store.createNode({
+      title: "Old decision to supersede",
+      type: "note",
+      content: "Will be superseded.",
+    });
+    store.createNode({
+      title: "New replacement",
+      type: "note",
+      content: "Supersedes the old one.",
+      links: [{ target: old.id, type: "supersedes" }],
+    });
+
+    const stale = store.createNode({
+      title: "Stale leaf",
+      type: "note",
+      content: "Should be demoted.",
+    });
+    backdateNode(stale.id, 30 * 24);
+    simulateActiveDays(10);
+
+    const dryHandler = new MaintenanceHandler(store, store.getDb(), { dryRun: true });
+    const dryResult = await dryHandler.run();
+
+    expect(dryResult.supersessionMarked.length).toBeGreaterThan(0);
+
+    // Nothing actually changed
+    expect(store.getNode(old.id)!.status).toBe("active");
+    expect(store.getNode(stale.id)!.status).toBe("active");
+
+    const logs = store
+      .getDb()
+      .prepare("SELECT action FROM maintenance_log WHERE action LIKE '%preview%'")
+      .all() as { action: string }[];
+    expect(logs.length).toBeGreaterThan(0);
+  });
+
+  it("facts require 14 active days before demotion, not 7", async () => {
+    const fact = store.createNode({
+      title: "API response format",
+      type: "fact",
+      content: "All API responses use JSON:API envelope format.",
+    });
+    backdateNode(fact.id, 30 * 24);
+
+    // 10 active days — past note threshold (7) but not fact threshold (14)
+    simulateActiveDays(10);
+
+    const handler = new MaintenanceHandler(store, store.getDb());
+    const result = await handler.run();
+
+    expect(result.demoted).not.toContain(fact.id);
+    expect(store.getNode(fact.id)!.status).toBe("active");
+  });
+
+  it("a project break does not advance the demotion clock", async () => {
+    // Create a decision
+    const decision = store.createNode({
+      title: "Use PostgreSQL",
+      type: "decision",
+      content: "Chose PostgreSQL for the primary datastore.",
+    });
+    backdateNode(decision.id, 90 * 24); // Created 90 wall-clock days ago
+
+    // But only 5 active days of work happened since then
+    simulateActiveDays(5);
+
+    const handler = new MaintenanceHandler(store, store.getDb());
+    const result = await handler.run();
+
+    // 5 active days < 30 day decision threshold — survives despite 90 wall-clock days
+    expect(result.demoted).not.toContain(decision.id);
+    expect(store.getNode(decision.id)!.status).toBe("active");
+  });
+
+  it("multiple maintenance runs converge without destroying the graph", async () => {
+    const nodes: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const n = store.createNode({
+        title: `Note ${i}`,
+        type: "note",
+        content: `Content for note ${i}.`,
+      });
+      backdateNode(n.id, 60 * 24);
+      nodes.push(n.id);
+    }
+
+    const decision = store.createNode({
+      title: "Important architecture decision",
+      type: "decision",
+      content: "We use event sourcing for the order pipeline.",
+    });
+    backdateNode(decision.id, 60 * 24);
+
+    // 10 active days: enough to demote notes (7) but not decisions (30)
+    simulateActiveDays(10);
+
+    // Each run needs new activity to avoid the idle-graph check.
+    // Simulate by adding a node before each run on a distinct date.
+    for (let run = 0; run < 10; run++) {
+      const marker = store.createNode({
+        title: `Run ${run} marker`,
+        type: "note",
+        content: `Activity for run ${run}.`,
+      });
+      // Give each marker a unique created date so they count as distinct active days
+      const created = new Date(Date.now() + (run + 1) * 24 * 3_600_000).toISOString();
+      store.getDb().prepare("UPDATE nodes SET created = ? WHERE id = ?").run(created, marker.id);
+
+      const handler = new MaintenanceHandler(store, store.getDb());
+      await handler.run();
+    }
+
+    // All original notes should eventually be demoted
+    const activeNotes = nodes.filter((id) => store.getNode(id)!.status === "active");
+    expect(activeNotes.length).toBe(0);
+
+    // Decision survives (only ~20 active days, threshold is 30)
+    expect(store.getNode(decision.id)!.status).toBe("active");
+
+    // Nothing hard-deleted
+    for (const id of [...nodes, decision.id]) {
+      expect(fs.existsSync(path.join(tmpDir, "nodes", `${id}.md`))).toBe(true);
+    }
+  });
+});
+
+// ── 9. Scratchpad sizing ──────────────────────────────────────────
 
 describe("scratchpad re-injection", () => {
   it("realistically-sized scratchpad roundtrips without truncation", () => {

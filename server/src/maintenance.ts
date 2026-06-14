@@ -19,16 +19,39 @@ export interface MaintenanceResult {
   supersessionMarked: string[];
   danglingEdgesRepaired: number;
   communities: number;
+  skippedDemotion: string[];
+  cappedDemotion: string[];
   log: string[];
 }
+
+export interface MaintenanceOptions {
+  dryRun?: boolean;
+}
+
+const TYPE_MIN_ACTIVE_DAYS: Record<string, number> = {
+  note: 7,
+  task: 7,
+  fact: 14,
+  context: 14,
+  decision: 30,
+  pattern: 30,
+};
+const DEFAULT_MIN_ACTIVE_DAYS = 14;
+
+const PROTECTED_TYPES = new Set(["community_summary"]);
+
+const MAX_DEMOTION_FRACTION = 0.2;
 
 export class MaintenanceHandler {
   private store: Store;
   private db: Database.Database;
 
-  constructor(store: Store, db: Database.Database) {
+  private options: MaintenanceOptions;
+
+  constructor(store: Store, db: Database.Database, options?: MaintenanceOptions) {
     this.store = store;
     this.db = db;
+    this.options = options ?? {};
   }
 
   async run(): Promise<MaintenanceResult> {
@@ -39,6 +62,8 @@ export class MaintenanceHandler {
       supersessionMarked: [],
       danglingEdgesRepaired: 0,
       communities: 0,
+      skippedDemotion: [],
+      cappedDemotion: [],
       log,
     };
 
@@ -56,11 +81,18 @@ export class MaintenanceHandler {
       log.push(`marked ${superseded.length} node(s) as superseded: ${superseded.join(", ")}`);
     }
 
-    // 3. Demote stale low-importance leaf nodes
-    const demoted = this.demoteStaleLeaves(scores);
-    result.demoted = demoted;
-    if (demoted.length > 0) {
-      log.push(`demoted ${demoted.length} stale leaf node(s): ${demoted.join(", ")}`);
+    // 3. Demote stale low-importance leaf nodes (skip if graph is idle)
+    if (this.isGraphIdle()) {
+      log.push("graph is idle (no new nodes since last run), skipping demotion");
+    } else {
+      const demoted = this.demoteStaleLeaves(scores, result);
+      result.demoted = demoted;
+      if (demoted.length > 0) {
+        log.push(`demoted ${demoted.length} stale leaf node(s)${this.options.dryRun ? " (dry run)" : ""}: ${demoted.join(", ")}`);
+      }
+      if (result.skippedDemotion.length > 0) {
+        log.push(`skipped ${result.skippedDemotion.length} node(s) (type protection or not enough active days)`);
+      }
     }
 
     // 4. Repair dangling edges
@@ -159,42 +191,73 @@ export class MaintenanceHandler {
 
     const marked: string[] = [];
     for (const { target_id } of targets) {
-      this.store.updateNode(target_id, { status: "superseded" });
+      if (!this.options.dryRun) {
+        this.store.updateNode(target_id, { status: "superseded" });
+      }
       marked.push(target_id);
-      this.logAction("supersede", target_id, "marked as superseded by active successor");
+      this.logAction(
+        this.options.dryRun ? "supersede_preview" : "supersede",
+        target_id,
+        "marked as superseded by active successor"
+      );
     }
     return marked;
   }
 
   // ── Stale leaf demotion ─────────────────────────────────────
 
-  private demoteStaleLeaves(scores: ImportanceScore[]): string[] {
+  private demoteStaleLeaves(
+    scores: ImportanceScore[],
+    result: MaintenanceResult
+  ): string[] {
     const demoted: string[] = [];
     const STALE_THRESHOLD = 0.15;
-    const MIN_AGE_HOURS = 168; // 7 days
+
+    const activeCount = scores.length;
+    const maxDemotions = Math.max(1, Math.floor(activeCount * MAX_DEMOTION_FRACTION));
 
     for (const score of scores) {
       if (!score.isLeaf) continue;
-      if (score.inDegree > 0) continue; // not truly a leaf
+      if (score.inDegree > 0) continue;
       if (score.total >= STALE_THRESHOLD) continue;
-      if (score.recency > 0.5) continue; // too recent
+      if (score.recency > 0.5) continue;
 
-      // Check age — don't demote anything less than a week old
-      const node = this.db
-        .prepare("SELECT updated FROM nodes WHERE id = ?")
-        .get(score.nodeId) as { updated: string } | undefined;
-      if (!node) continue;
+      const row = this.db
+        .prepare("SELECT type, updated FROM nodes WHERE id = ?")
+        .get(score.nodeId) as { type: string; updated: string } | undefined;
+      if (!row) continue;
 
-      const ageHours =
-        (Date.now() - new Date(node.updated).getTime()) / 3_600_000;
-      if (ageHours < MIN_AGE_HOURS) continue;
+      if (PROTECTED_TYPES.has(row.type)) {
+        result.skippedDemotion.push(score.nodeId);
+        continue;
+      }
 
-      this.store.updateNode(score.nodeId, { status: "archived" });
+      const minActiveDays = TYPE_MIN_ACTIVE_DAYS[row.type] ?? DEFAULT_MIN_ACTIVE_DAYS;
+      const activeDays = this.countActiveDaysSince(row.updated);
+      if (activeDays < minActiveDays) {
+        result.skippedDemotion.push(score.nodeId);
+        continue;
+      }
+
+      if (demoted.length >= maxDemotions) {
+        result.cappedDemotion.push(score.nodeId);
+        continue;
+      }
+
+      if (!this.options.dryRun) {
+        this.store.updateNode(score.nodeId, { status: "archived" });
+      }
       demoted.push(score.nodeId);
       this.logAction(
-        "demote",
+        this.options.dryRun ? "demote_preview" : "demote",
         score.nodeId,
-        `leaf node with importance ${score.total.toFixed(3)}, age ${Math.round(ageHours)}h`
+        `${row.type} leaf, importance ${score.total.toFixed(3)}, ${activeDays} active days since update (threshold ${minActiveDays})`
+      );
+    }
+
+    if (result.cappedDemotion.length > 0) {
+      result.log.push(
+        `capped demotion at ${maxDemotions} (20% of ${activeCount} active nodes), ${result.cappedDemotion.length} deferred`
       );
     }
 
@@ -418,6 +481,35 @@ export class MaintenanceHandler {
         }),
         new Date().toISOString()
       );
+  }
+
+  // ── Activity tracking ────────────────────────────────────────
+
+  private isGraphIdle(): boolean {
+    const lastRun = this.db
+      .prepare(
+        "SELECT timestamp FROM maintenance_log WHERE action = 'run_complete' ORDER BY id DESC LIMIT 1"
+      )
+      .get() as { timestamp: string } | undefined;
+
+    if (!lastRun) return false;
+
+    const newNodes = this.db
+      .prepare(
+        "SELECT COUNT(*) as cnt FROM nodes WHERE created > ? AND type != 'community_summary'"
+      )
+      .get(lastRun.timestamp) as { cnt: number };
+
+    return newNodes.cnt === 0;
+  }
+
+  private countActiveDaysSince(since: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(DISTINCT date(created)) as cnt FROM nodes WHERE created > ? AND type != 'community_summary'"
+      )
+      .get(since) as { cnt: number };
+    return row.cnt;
   }
 
   // ── Helpers ─────────────────────────────────────────────────
