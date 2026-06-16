@@ -26,42 +26,50 @@ npm run build
 npm start
 ```
 
-### Per-project (isolated memory)
+### Claude Code (VS Code extension)
 
-Each project spawns its own DRAM process with a separate data directory. No port conflicts, no shared state between unrelated projects. Create a `.mcp.json` in the project root (for VS Code extension) or `.claude/mcp.json` (for CLI):
-
+Create `.mcp.json` in the project root:
 ```json
 {
   "mcpServers": {
     "dram": {
       "type": "stdio",
       "command": "node",
-      "args": ["/absolute/path/to/server/dist/index.js", "--data-dir", "~/.dram/my-project"]
+      "args": ["/absolute/path/to/server/dist/index.js"]
     }
   }
 }
 ```
 
-### Shared (cross-project memory)
+For the Claude Code CLI, use `.claude/mcp.json` instead.
 
-Run one DRAM server in HTTP mode, connect multiple projects to it. Projects share the same knowledge graph.
+### OpenAI Codex (VS Code / CLI)
 
-Start the server:
+Add to `.codex/config.toml` in the project root (or `~/.codex/config.toml` for global):
+```toml
+[mcp_servers.dram]
+command = "node"
+args = ["/absolute/path/to/server/dist/index.js"]
+env = { "DRAM_TRANSPORT" = "stdio" }
+startup_timeout_sec = 15
+```
+
+Copy the memory protocol from [protocols/codex.md](protocols/codex.md) into your project's `AGENTS.md`.
+
+### Isolated vs shared memory
+
+Use `--data-dir` to give each project its own data directory:
+```
+"args": ["/path/to/dist/index.js", "--data-dir", "~/.dram/my-project"]
+```
+
+Or omit `--data-dir` to share a single graph across all projects. For a shared HTTP server that multiple projects connect to:
+
 ```
 DRAM_TRANSPORT=http node /path/to/server/dist/index.js
 ```
 
-Then in each project's `.mcp.json` (VS Code) or `.claude/mcp.json` (CLI):
-```json
-{
-  "mcpServers": {
-    "dram": {
-      "type": "streamable-http",
-      "url": "http://localhost:3577/mcp"
-    }
-  }
-}
-```
+Then configure each project to connect via HTTP instead of stdio. See [protocols/](protocols/) for surface-specific setup.
 
 ### Hooks (Claude Code)
 
