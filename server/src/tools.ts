@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Store } from "./store.js";
+import type { ProjectManager } from "./project-manager.js";
 import type { MemoryNode } from "./types.js";
 import { extractEntities } from "./extraction.js";
 import { MaintenanceHandler } from "./maintenance.js";
@@ -31,22 +32,44 @@ export interface ScoredNode {
   recency: number;
   inDegree: number;
   finalScore: number;
+  sourceProject?: string;
 }
 
-export function registerTools(server: McpServer, store: Store): void {
+const PROJECT_PARAM = z
+  .string()
+  .optional()
+  .describe(
+    "Project ID to scope this operation to. Auto-creates the project on first use. Omit for the default project."
+  );
+
+function newProjectNotice(projectId: string, pm: ProjectManager): string {
+  const others = pm
+    .listProjects()
+    .filter((p) => p.id !== projectId);
+  if (others.length === 0) return `New project "${projectId}" created (isolated mode). This is the first project.`;
+  const list = others
+    .map((p) => `${p.id} (${p.nodeCount} nodes, ${p.mode})`)
+    .join(", ");
+  return `New project "${projectId}" created (isolated mode). Other projects: ${list}. Use configure_project to link projects for cross-project knowledge sharing.`;
+}
+
+export function registerTools(server: McpServer, pm: ProjectManager): void {
   server.tool(
     "restore",
     "Return the current scratchpad for this session. Call on start or resume before any other action.",
     {
       session_id: z.string().describe("The current session ID"),
+      project: PROJECT_PARAM,
     },
-    async ({ session_id }) => {
+    async ({ session_id, project }) => {
+      const { store, isNew, projectId } = pm.resolveStore(project);
       const content = store.getScratchpad(session_id);
+      const prefix = isNew ? newProjectNotice(projectId, pm) + "\n\n" : "";
       return {
         content: [
           {
             type: "text" as const,
-            text: content || "(no scratchpad found for this session)",
+            text: prefix + (content || "(no scratchpad found for this session)"),
           },
         ],
       };
@@ -63,8 +86,10 @@ export function registerTools(server: McpServer, store: Store): void {
         .describe(
           "Distilled scratchpad: task, decisions, progress, open questions, constraints"
         ),
+      project: PROJECT_PARAM,
     },
-    async ({ session_id, state }) => {
+    async ({ session_id, state, project }) => {
+      const { store } = pm.resolveStore(project);
       store.saveScratchpad(session_id, state);
       return {
         content: [{ type: "text" as const, text: "Scratchpad saved." }],
@@ -84,12 +109,13 @@ export function registerTools(server: McpServer, store: Store): void {
           .optional()
           .describe("Optional task completion summary"),
       }),
+      project: PROJECT_PARAM,
     },
-    async ({ session_id, residue }) => {
+    async ({ session_id, residue, project }) => {
+      const { store } = pm.resolveStore(project);
       const result = store.commitTask(session_id, residue);
       const ids = result.nodes.map((n) => n.id);
 
-      // Enrich committed nodes (extraction + embeddings + derived edges)
       await store.enrichAfterCommit(ids);
 
       return {
@@ -105,7 +131,7 @@ export function registerTools(server: McpServer, store: Store): void {
 
   server.tool(
     "read_subgraph",
-    "Return the task-relevant neighborhood of the graph. Seeds by semantic similarity (when embeddings are available) and keyword match. Expands along typed edges weighted by relationship type. Ranks by similarity, recency, connectivity, and entity overlap. Trims to a token budget.",
+    "Return the task-relevant neighborhood of the graph. Seeds by semantic similarity (when embeddings are available) and keyword match. Expands along typed edges weighted by relationship type. Ranks by similarity, recency, connectivity, and entity overlap. Trims to a token budget. In shared mode, also searches linked projects.",
     {
       task: z.string().describe("Description of the current task"),
       budget: z
@@ -113,27 +139,48 @@ export function registerTools(server: McpServer, store: Store): void {
         .optional()
         .default(4000)
         .describe("Approximate token budget for the returned subgraph"),
+      project: PROJECT_PARAM,
     },
-    async ({ task, budget }) => {
-      const scored = await rankSubgraph(store, task);
+    async ({ task, budget, project }) => {
+      const { store, isNew, projectId } = pm.resolveStore(project);
+      const prefix = isNew ? newProjectNotice(projectId, pm) + "\n\n" : "";
 
-      if (scored.length === 0) {
+      const localScored = await rankSubgraph(store, task);
+
+      let allScored: ScoredNode[] = localScored.map((s) => ({
+        ...s,
+        sourceProject: projectId,
+      }));
+
+      const linkedStores = pm.getLinkedStores(projectId);
+      for (const { store: linkedStore, projectId: linkedId } of linkedStores) {
+        const linkedScored = await rankSubgraph(linkedStore, task);
+        const penalized = linkedScored.map((s) => ({
+          ...s,
+          finalScore: s.finalScore * 0.6,
+          sourceProject: linkedId,
+        }));
+        allScored = allScored.concat(penalized);
+      }
+
+      allScored.sort((a, b) => b.finalScore - a.finalScore);
+
+      if (allScored.length === 0) {
         return {
           content: [
             {
               type: "text" as const,
-              text: "No relevant nodes found in the graph.",
+              text: prefix + "No relevant nodes found in the graph.",
             },
           ],
         };
       }
 
-      // Trim to budget (~4 chars per token)
       const charBudget = budget * 4;
       let totalChars = 0;
       const included: ScoredNode[] = [];
 
-      for (const entry of scored) {
+      for (const entry of allScored) {
         const nodeText = formatNode(entry);
         if (totalChars + nodeText.length > charBudget && included.length > 0)
           break;
@@ -142,12 +189,22 @@ export function registerTools(server: McpServer, store: Store): void {
       }
 
       const text = included.map(formatNode).join("\n\n---\n\n");
-      const trimmed = scored.length - included.length;
+      const trimmed = allScored.length - included.length;
+      const crossProjectCount = included.filter(
+        (s) => s.sourceProject && s.sourceProject !== projectId
+      ).length;
+      const crossNote =
+        crossProjectCount > 0
+          ? ` (${crossProjectCount} from linked projects)`
+          : "";
+
       return {
         content: [
           {
             type: "text" as const,
-            text: `Found ${included.length} relevant node(s)${trimmed > 0 ? ` (${trimmed} trimmed by budget)` : ""}:\n\n${text}`,
+            text:
+              prefix +
+              `Found ${included.length} relevant node(s)${crossNote}${trimmed > 0 ? ` (${trimmed} trimmed by budget)` : ""}:\n\n${text}`,
           },
         ],
       };
@@ -163,8 +220,10 @@ export function registerTools(server: McpServer, store: Store): void {
         .optional()
         .default(false)
         .describe("Preview changes without applying them"),
+      project: PROJECT_PARAM,
     },
-    async ({ dry_run }) => {
+    async ({ dry_run, project }) => {
+      const { store } = pm.resolveStore(project);
       const handler = new MaintenanceHandler(store, store.getDb(), { dryRun: dry_run });
       const result = await handler.run();
 
@@ -189,6 +248,77 @@ export function registerTools(server: McpServer, store: Store): void {
           {
             type: "text" as const,
             text: lines.join("\n"),
+          },
+        ],
+      };
+    }
+  );
+
+  // ── Project management tools ───────────────────────────────
+
+  server.tool(
+    "configure_project",
+    "Configure a project's isolation mode and cross-project links. Use this to enable shared mode and link projects for cross-project knowledge retrieval.",
+    {
+      project: z.string().describe("Project ID to configure"),
+      mode: z
+        .enum(["isolated", "shared"])
+        .optional()
+        .describe("Set project mode: isolated (default) or shared (enables cross-project queries)"),
+      link: z
+        .array(z.string())
+        .optional()
+        .describe("Project IDs to link with (bidirectional). Both projects must be in shared mode for cross-project queries to work."),
+      unlink: z
+        .array(z.string())
+        .optional()
+        .describe("Project IDs to unlink from"),
+    },
+    async ({ project, mode, link, unlink }) => {
+      const config = pm.configureProject(project, { mode, link, unlink });
+      const linkedList =
+        config.linkedTo.length > 0
+          ? config.linkedTo.join(", ")
+          : "(none)";
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Project "${project}" configured: mode=${config.mode}, linked to: ${linkedList}.`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "list_projects",
+    "List all registered projects with their mode, links, and node counts. Useful for discovering available projects and deciding whether to link them.",
+    {},
+    async () => {
+      const projects = pm.listProjects();
+      if (projects.length === 0) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "No projects registered yet. Projects are auto-created on first tool call with a project parameter.",
+            },
+          ],
+        };
+      }
+
+      const lines = projects.map((p) => {
+        const links =
+          p.linkedTo.length > 0 ? `, linked to: ${p.linkedTo.join(", ")}` : "";
+        return `- **${p.id}**: ${p.nodeCount} nodes, ${p.mode}${links} (created ${p.created.split("T")[0]})`;
+      });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Registered projects:\n\n${lines.join("\n")}`,
           },
         ],
       };
@@ -315,9 +445,11 @@ function formatNode(entry: ScoredNode): string {
     entry.similarity > 0
       ? ` [similarity: ${(entry.similarity * 100).toFixed(0)}%]`
       : "";
+  const projectTag =
+    entry.sourceProject ? ` [project: ${entry.sourceProject}]` : "";
   const links =
     n.links.length > 0
       ? `\nLinks: ${n.links.map((l) => `${l.type} → ${l.target}`).join(", ")}`
       : "";
-  return `## ${n.title}${sim}${entities}\n- id: ${n.id}\n- type: ${n.type}\n- updated: ${n.updated}\n- score: ${(entry.finalScore * 100).toFixed(1)}${links}\n\n${n.content}`;
+  return `## ${n.title}${sim}${entities}${projectTag}\n- id: ${n.id}\n- type: ${n.type}\n- updated: ${n.updated}\n- score: ${(entry.finalScore * 100).toFixed(1)}${links}\n\n${n.content}`;
 }

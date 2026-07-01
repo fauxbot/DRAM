@@ -1,6 +1,6 @@
 import http from "http";
 import { randomUUID } from "node:crypto";
-import type { Store } from "./store.js";
+import type { ProjectManager } from "./project-manager.js";
 import { MaintenanceHandler } from "./maintenance.js";
 import { validateBearerToken, isAuthEnabled } from "./auth.js";
 import { createMcpServer } from "./transport.js";
@@ -43,7 +43,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 async function handleMcpRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  store: Store
+  pm: ProjectManager
 ): Promise<void> {
   const method = req.method;
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
@@ -82,7 +82,7 @@ async function handleMcpRequest(
         }
       };
 
-      const server = createMcpServer(store);
+      const server = createMcpServer(pm);
       await server.connect(transport);
       await transport.handleRequest(req, res, parsedBody);
       return;
@@ -118,7 +118,7 @@ export interface HttpServerOptions {
 }
 
 export function createHttpServer(
-  store: Store,
+  pm: ProjectManager,
   port: number,
   options?: HttpServerOptions
 ): http.Server {
@@ -134,7 +134,7 @@ export function createHttpServer(
 
     if (enableMcp && url.startsWith("/mcp")) {
       try {
-        await handleMcpRequest(req, res, store);
+        await handleMcpRequest(req, res, pm);
       } catch (err) {
         if (!res.headersSent) {
           sendJson(res, 500, {
@@ -156,11 +156,12 @@ export function createHttpServer(
       });
       req.on("end", () => {
         try {
-          const { session_id, reason, snapshot } = JSON.parse(body);
+          const { session_id, reason, snapshot, project } = JSON.parse(body);
           if (!session_id) {
             sendJson(res, 400, { error: "session_id required" });
             return;
           }
+          const { store } = pm.resolveStore(project);
           store.recordSnapshot({
             session_id,
             reason: reason || "hook",
@@ -178,10 +179,12 @@ export function createHttpServer(
     if (req.method === "GET" && url?.startsWith("/scratchpad")) {
       const parsedUrl = new URL(url, `http://localhost:${port}`);
       const sessionId = parsedUrl.searchParams.get("session_id");
+      const project = parsedUrl.searchParams.get("project") || undefined;
       if (!sessionId) {
         sendJson(res, 400, { error: "session_id query parameter required" });
         return;
       }
+      const { store } = pm.resolveStore(project);
       const content = store.getScratchpad(sessionId);
       sendJson(res, 200, {
         session_id: sessionId,
@@ -191,6 +194,15 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && url === "/maintain") {
+      const rawBody = await readBody(req);
+      let project: string | undefined;
+      try {
+        const parsed = JSON.parse(rawBody);
+        project = parsed.project;
+      } catch {
+        // no body or invalid — use default project
+      }
+      const { store } = pm.resolveStore(project);
       const handler = new MaintenanceHandler(store, store.getDb());
       handler
         .run()
@@ -202,7 +214,22 @@ export function createHttpServer(
     }
 
     if (req.method === "GET" && url === "/health") {
-      sendJson(res, 200, { status: "ok", version: "0.4.0" });
+      const projects = pm.listProjects();
+      sendJson(res, 200, {
+        status: "ok",
+        version: "0.5.0",
+        projects: projects.length,
+        projectList: projects.map((p) => ({
+          id: p.id,
+          mode: p.mode,
+          nodes: p.nodeCount,
+        })),
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url === "/projects") {
+      sendJson(res, 200, { projects: pm.listProjects() });
       return;
     }
 

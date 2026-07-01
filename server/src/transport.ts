@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Store } from "./store.js";
+import type { ProjectManager } from "./project-manager.js";
 import { registerTools } from "./tools.js";
 
 export type TransportMode = "stdio" | "http" | "both";
@@ -10,11 +10,11 @@ export function getTransportMode(): TransportMode {
   return "stdio";
 }
 
-export function createMcpServer(store: Store): McpServer {
+export function createMcpServer(pm: ProjectManager): McpServer {
   const server = new McpServer({
     name: "dram",
-    version: "0.4.0",
+    version: "0.5.0",
   });
-  registerTools(server, store);
+  registerTools(server, pm);
   return server;
 }

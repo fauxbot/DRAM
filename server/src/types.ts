@@ -31,3 +31,24 @@ export interface SnapshotRecord {
   snapshot: string;
   timestamp: string;
 }
+
+// ── Multi-project types ──────────────────────────────────────
+
+export interface ProjectConfig {
+  mode: "isolated" | "shared";
+  linkedTo: string[];
+  created: string;
+}
+
+export interface DramConfig {
+  version: number;
+  projects: Record<string, ProjectConfig>;
+}
+
+export interface ProjectInfo {
+  id: string;
+  mode: "isolated" | "shared";
+  linkedTo: string[];
+  created: string;
+  nodeCount: number;
+}
