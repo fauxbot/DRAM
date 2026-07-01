@@ -624,8 +624,6 @@ describe("index rebuild", () => {
   });
 });
 
-// ── 8. Scratchpad sizing ──────────────────────────────────────────
-
 // ── 8. Archive-then-GC tuning ─────────────────────────────────────
 
 describe("GC tuning", () => {
@@ -923,5 +921,164 @@ describe("scratchpad re-injection", () => {
 
     expect(restored).toBe(scratchpad);
     expect(restored!.length).toBe(scratchpad.length);
+  });
+});
+
+// ── 10. Multi-project isolation and federation ───────────────────
+
+import { ProjectManager } from "../project-manager.js";
+
+describe("multi-project", () => {
+  let pmDir: string;
+  let pm: ProjectManager;
+
+  beforeEach(() => {
+    pmDir = makeTmpDir();
+    pm = new ProjectManager(pmDir);
+    pm.setEmbeddingProvider(new NoopEmbedding());
+  });
+
+  afterEach(() => {
+    pm.close();
+    rmrf(pmDir);
+  });
+
+  it("auto-creates isolated projects on first access", () => {
+    const { store: s1, isNew: isNew1, projectId: id1 } = pm.resolveStore("app-one");
+    expect(isNew1).toBe(true);
+    expect(id1).toBe("app-one");
+
+    const { isNew: isNew2 } = pm.resolveStore("app-one");
+    expect(isNew2).toBe(false);
+
+    const projects = pm.listProjects();
+    expect(projects.length).toBe(1);
+    expect(projects[0].id).toBe("app-one");
+    expect(projects[0].mode).toBe("isolated");
+  });
+
+  it("projects are isolated by default — nodes don't leak", async () => {
+    const { store: storeA } = pm.resolveStore("project-a");
+    const { store: storeB } = pm.resolveStore("project-b");
+
+    storeA.commitTask("s1", {
+      nodes: [{ title: "Secret A node", type: "fact", content: "This belongs to project A only." }],
+    });
+
+    storeB.commitTask("s2", {
+      nodes: [{ title: "Secret B node", type: "fact", content: "This belongs to project B only." }],
+    });
+
+    const resultsA = await rankSubgraph(storeA, "secret node");
+    const resultsB = await rankSubgraph(storeB, "secret node");
+
+    expect(resultsA.every((r) => r.node.title.includes("A"))).toBe(true);
+    expect(resultsB.every((r) => r.node.title.includes("B"))).toBe(true);
+  });
+
+  it("linked projects in shared mode surface cross-project results", async () => {
+    const { store: storeA } = pm.resolveStore("alpha");
+    const { store: storeB } = pm.resolveStore("beta");
+
+    const rA = storeA.commitTask("s1", {
+      nodes: [{ title: "Auth middleware design", type: "decision", content: "Using JWT RS256 tokens for all API endpoints." }],
+    });
+    await storeA.enrichAfterCommit(rA.nodes.map((n) => n.id));
+
+    const rB = storeB.commitTask("s2", {
+      nodes: [{ title: "Beta API client", type: "fact", content: "The beta client uses token-based auth to call the API." }],
+    });
+    await storeB.enrichAfterCommit(rB.nodes.map((n) => n.id));
+
+    pm.configureProject("alpha", { mode: "shared", link: ["beta"] });
+    pm.configureProject("beta", { mode: "shared" });
+
+    const linkedStores = pm.getLinkedStores("alpha");
+    expect(linkedStores.length).toBe(1);
+    expect(linkedStores[0].projectId).toBe("beta");
+
+    const localOnly = await rankSubgraph(storeA, "JWT token authentication API");
+    const localTitles = localOnly.map((s) => s.node.title);
+    expect(localTitles).toContain("Auth middleware design");
+    expect(localTitles).not.toContain("Beta API client");
+
+    const crossResults = await rankSubgraph(storeB, "JWT token authentication API");
+    const crossTitles = crossResults.map((s) => s.node.title);
+    expect(crossTitles).toContain("Beta API client");
+  });
+
+  it("configure_project updates mode and links bidirectionally", () => {
+    pm.resolveStore("proj-x");
+    pm.resolveStore("proj-y");
+
+    pm.configureProject("proj-x", { mode: "shared", link: ["proj-y"] });
+
+    const configX = pm.getProjectConfig("proj-x");
+    const configY = pm.getProjectConfig("proj-y");
+
+    expect(configX!.mode).toBe("shared");
+    expect(configX!.linkedTo).toContain("proj-y");
+    expect(configY!.linkedTo).toContain("proj-x");
+
+    pm.configureProject("proj-x", { unlink: ["proj-y"] });
+    const afterX = pm.getProjectConfig("proj-x");
+    const afterY = pm.getProjectConfig("proj-y");
+    expect(afterX!.linkedTo).not.toContain("proj-y");
+    expect(afterY!.linkedTo).not.toContain("proj-x");
+  });
+
+  it("list_projects returns accurate node counts", () => {
+    const { store: s } = pm.resolveStore("counted");
+    s.createNode({ title: "Node 1", type: "fact", content: "First" });
+    s.createNode({ title: "Node 2", type: "fact", content: "Second" });
+
+    const projects = pm.listProjects();
+    const counted = projects.find((p) => p.id === "counted");
+    expect(counted).toBeDefined();
+    expect(counted!.nodeCount).toBe(2);
+  });
+
+  it("default project works when no project param is given", () => {
+    const { store: s, projectId } = pm.resolveStore();
+    expect(projectId).toBe("_default");
+    s.saveScratchpad("test", "hello");
+    expect(s.getScratchpad("test")).toBe("hello");
+  });
+
+  it("project IDs are sanitized", () => {
+    const { projectId } = pm.resolveStore("My Project! 123");
+    expect(projectId).toBe("my_project__123");
+  });
+
+  it("config persists across ProjectManager instances", () => {
+    pm.resolveStore("persistent");
+    pm.configureProject("persistent", { mode: "shared" });
+    pm.close();
+
+    const pm2 = new ProjectManager(pmDir);
+    const config = pm2.getProjectConfig("persistent");
+    expect(config).toBeDefined();
+    expect(config!.mode).toBe("shared");
+    pm2.close();
+  });
+
+  it("legacy data at root is auto-migrated to _default project", () => {
+    const legacyDir = makeTmpDir();
+
+    fs.mkdirSync(path.join(legacyDir, "nodes"), { recursive: true });
+    fs.writeFileSync(path.join(legacyDir, "nodes", "test.md"), "---\nid: test\ntitle: Legacy\ntype: fact\nstatus: active\ncreated: '2026-01-01'\nupdated: '2026-01-01'\n---\nLegacy content");
+    fs.writeFileSync(path.join(legacyDir, "index.db"), "");
+
+    const legacyPm = new ProjectManager(legacyDir);
+
+    const defaultDir = path.join(legacyDir, "projects", "_default");
+    expect(fs.existsSync(path.join(defaultDir, "nodes", "test.md"))).toBe(true);
+    expect(fs.existsSync(path.join(legacyDir, "nodes"))).toBe(false);
+
+    const projects = legacyPm.listProjects();
+    expect(projects.some((p) => p.id === "_default")).toBe(true);
+
+    legacyPm.close();
+    rmrf(legacyDir);
   });
 });
