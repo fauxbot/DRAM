@@ -109,23 +109,62 @@ DRAM_TRANSPORT=both npm start
 
 This is useful when Claude Code connects over stdio for the primary MCP session, while hooks use the HTTP API to sync snapshots.
 
-### With Ollama embeddings
+### Embeddings
 
-DRAM uses Ollama for semantic embeddings by default. If Ollama is running locally:
+DRAM uses embeddings for semantic similarity search. Three providers are supported:
+
+**Ollama (default)** — runs locally, no API key needed:
 
 ```bash
 # Pull the embedding model (one-time)
 ollama pull nomic-embed-text
 
-# DRAM will auto-detect Ollama at http://localhost:11434
+# DRAM auto-detects Ollama at http://localhost:11434
 npm start
 ```
 
-Without Ollama, DRAM falls back to keyword-only retrieval:
+**OpenAI** — uses the OpenAI embeddings API:
+
+```bash
+DRAM_EMBEDDING_PROVIDER=openai \
+DRAM_OPENAI_API_KEY=sk-... \
+npm start
+```
+
+Defaults to `text-embedding-3-small` (1536 dimensions). Override with `DRAM_EMBEDDING_MODEL`:
+
+```bash
+DRAM_EMBEDDING_PROVIDER=openai \
+DRAM_EMBEDDING_MODEL=text-embedding-3-large \
+npm start
+```
+
+**OpenAI-compatible APIs** — works with Azure OpenAI, Together AI, LM Studio, vLLM, or any endpoint that implements the OpenAI embeddings format:
+
+```bash
+DRAM_EMBEDDING_PROVIDER=openai \
+DRAM_EMBEDDING_URL=https://my-deployment.openai.azure.com/openai/deployments/my-embedding \
+DRAM_OPENAI_API_KEY=your-azure-key \
+DRAM_EMBEDDING_MODEL=text-embedding-3-small \
+npm start
+```
+
+```bash
+# LM Studio / local OpenAI-compatible server
+DRAM_EMBEDDING_PROVIDER=openai \
+DRAM_EMBEDDING_URL=http://localhost:1234/v1 \
+DRAM_OPENAI_API_KEY=not-needed \
+DRAM_EMBEDDING_MODEL=nomic-embed-text \
+npm start
+```
+
+**None** — disables embeddings entirely, falls back to keyword-only retrieval:
 
 ```bash
 DRAM_EMBEDDING_PROVIDER=none npm start
 ```
+
+All providers auto-detect vector dimensions via a test embedding at startup. If the provider is unavailable (Ollama not running, bad API key, etc.), DRAM falls back to keyword search gracefully.
 
 ### Custom data directory
 
@@ -557,9 +596,11 @@ Without `MEMORY_SERVER_URL`, the hooks use local files only and are fully functi
 | `DRAM_TLS_DIR` | `~/.dram/certs/` | Directory for auto-generated certificates |
 | `DRAM_PROJECTS_ALLOW` | *(all)* | Comma-separated project IDs to expose. Omit for all. |
 | `DRAM_CORS_ORIGINS` | *(none)* | Allowed CORS origins. `*` for all, or comma-separated list. |
-| `DRAM_EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama` or `none` |
+| `DRAM_EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama`, `openai`, or `none` |
+| `DRAM_EMBEDDING_MODEL` | *(per provider)* | Model name. Defaults: `nomic-embed-text` (Ollama), `text-embedding-3-small` (OpenAI) |
 | `DRAM_OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL |
-| `DRAM_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model |
+| `DRAM_OPENAI_API_KEY` | — | OpenAI API key (falls back to `OPENAI_API_KEY`) |
+| `DRAM_EMBEDDING_URL` | `https://api.openai.com/v1` | Base URL for OpenAI-compatible embedding APIs |
 
 ---
 

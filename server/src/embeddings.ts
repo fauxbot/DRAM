@@ -18,20 +18,66 @@ export class OllamaEmbedding implements EmbeddingProvider {
   }
 
   async embed(texts: string[]): Promise<number[][]> {
-    const results: number[][] = [];
-    for (const text of texts) {
-      const res = await fetch(`${this.baseUrl}/api/embed`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: this.model, input: text }),
-      });
-      if (!res.ok) {
-        throw new Error(`Ollama embedding failed: ${res.status} ${res.statusText}`);
-      }
-      const data = (await res.json()) as { embeddings: number[][] };
-      results.push(data.embeddings[0]);
+    if (texts.length === 0) return [];
+    const res = await fetch(`${this.baseUrl}/api/embed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: this.model, input: texts }),
+    });
+    if (!res.ok) {
+      throw new Error(
+        `Ollama embedding failed: ${res.status} ${res.statusText}`
+      );
     }
-    return results;
+    const data = (await res.json()) as { embeddings: number[][] };
+    return data.embeddings;
+  }
+}
+
+export class OpenAIEmbedding implements EmbeddingProvider {
+  readonly name: string;
+  readonly dimensions: number;
+  private baseUrl: string;
+  private apiKey: string;
+  private model: string;
+
+  constructor(opts: {
+    apiKey: string;
+    baseUrl?: string;
+    model?: string;
+    dimensions?: number;
+  }) {
+    this.apiKey = opts.apiKey;
+    this.baseUrl = (
+      opts.baseUrl || "https://api.openai.com/v1"
+    ).replace(/\/+$/, "");
+    this.model = opts.model || "text-embedding-3-small";
+    this.dimensions = opts.dimensions || 1536;
+    this.name = `openai/${this.model}`;
+  }
+
+  async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const res = await fetch(`${this.baseUrl}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify({ model: this.model, input: texts }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `OpenAI embedding failed (${res.status}): ${body}`
+      );
+    }
+    const data = (await res.json()) as {
+      data: Array<{ embedding: number[]; index: number }>;
+    };
+    return data.data
+      .sort((a, b) => a.index - b.index)
+      .map((d) => d.embedding);
   }
 }
 
@@ -59,25 +105,71 @@ export function cosine(a: number[], b: number[]): number {
 
 export async function detectProvider(): Promise<EmbeddingProvider> {
   const provider = process.env.DRAM_EMBEDDING_PROVIDER || "ollama";
-  const ollamaUrl = process.env.DRAM_OLLAMA_URL || "http://localhost:11434";
-  const ollamaModel = process.env.DRAM_EMBEDDING_MODEL || "nomic-embed-text";
+  const model = process.env.DRAM_EMBEDDING_MODEL;
 
   if (provider === "none") {
     return new NoopEmbedding();
   }
 
-  if (provider === "ollama") {
+  if (provider === "openai") {
+    const apiKey =
+      process.env.DRAM_OPENAI_API_KEY || process.env.OPENAI_API_KEY || "";
+    if (!apiKey) {
+      process.stderr.write(
+        "dram: DRAM_EMBEDDING_PROVIDER=openai but no API key found (set DRAM_OPENAI_API_KEY or OPENAI_API_KEY)\n"
+      );
+      return new NoopEmbedding();
+    }
+
+    const baseUrl = process.env.DRAM_EMBEDDING_URL;
+    const openai = new OpenAIEmbedding({
+      apiKey,
+      baseUrl,
+      model: model || "text-embedding-3-small",
+    });
+
     try {
-      const res = await fetch(`${ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(2000) });
+      const test = await openai.embed(["test"]);
+      if (test[0] && test[0].length > 0) {
+        const detected = new OpenAIEmbedding({
+          apiKey,
+          baseUrl,
+          model: model || "text-embedding-3-small",
+          dimensions: test[0].length,
+        });
+        process.stderr.write(
+          `dram: using ${detected.name} (${detected.dimensions}d)\n`
+        );
+        return detected;
+      }
+    } catch (err) {
+      process.stderr.write(
+        `dram: OpenAI embedding probe failed: ${(err as Error).message}\n`
+      );
+    }
+
+    process.stderr.write(
+      "dram: OpenAI embeddings unavailable, using keyword search only\n"
+    );
+    return new NoopEmbedding();
+  }
+
+  if (provider === "ollama") {
+    const ollamaUrl = process.env.DRAM_OLLAMA_URL || "http://localhost:11434";
+    const ollamaModel = model || "nomic-embed-text";
+
+    try {
+      const res = await fetch(`${ollamaUrl}/api/tags`, {
+        signal: AbortSignal.timeout(2000),
+      });
       if (res.ok) {
         const ollama = new OllamaEmbedding({
           baseUrl: ollamaUrl,
           model: ollamaModel,
         });
-        // Probe dimensions with a test embed
         try {
           const test = await ollama.embed(["test"]);
-          if (test[0].length > 0) {
+          if (test[0] && test[0].length > 0) {
             const detected = new OllamaEmbedding({
               baseUrl: ollamaUrl,
               model: ollamaModel,

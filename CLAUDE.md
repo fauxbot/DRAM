@@ -115,9 +115,11 @@ before continuing. Re-reading is cheap; acting on stale context is not.
 
 - `DRAM_DATA_DIR` — data directory (default `~/.dram/`)
 - `DRAM_HTTP_PORT` — HTTP port (default `3577`)
-- `DRAM_EMBEDDING_PROVIDER` — `ollama` (default) or `none`
+- `DRAM_EMBEDDING_PROVIDER` — `ollama` (default), `openai`, or `none`
+- `DRAM_EMBEDDING_MODEL` — model name (default: `nomic-embed-text` for Ollama, `text-embedding-3-small` for OpenAI)
 - `DRAM_OLLAMA_URL` — Ollama API URL (default `http://localhost:11434`)
-- `DRAM_EMBEDDING_MODEL` — embedding model (default `nomic-embed-text`)
+- `DRAM_OPENAI_API_KEY` — OpenAI API key (falls back to `OPENAI_API_KEY`)
+- `DRAM_EMBEDDING_URL` — base URL for OpenAI-compatible APIs (default `https://api.openai.com/v1`)
 - `DRAM_TRANSPORT` — transport mode: `stdio` (default), `http` (remote only), `both` (stdio + HTTP MCP)
 - `DRAM_AUTH_TOKEN` — if set, all HTTP requests require `Authorization: Bearer <token>`
 - `DRAM_HTTP_HOST` — bind address (default `127.0.0.1`; set to `0.0.0.0` for remote access)
