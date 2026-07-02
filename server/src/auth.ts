@@ -1,4 +1,5 @@
-import type { IncomingMessage } from "http";
+import { timingSafeEqual } from "node:crypto";
+import type { IncomingMessage } from "node:http";
 
 const AUTH_TOKEN = process.env.DRAM_AUTH_TOKEN || "";
 
@@ -11,5 +12,9 @@ export function validateBearerToken(req: IncomingMessage): boolean {
   const header = req.headers.authorization;
   if (!header) return false;
   const [scheme, token] = header.split(" ", 2);
-  return scheme === "Bearer" && token === AUTH_TOKEN;
+  if (scheme !== "Bearer" || !token) return false;
+  const a = Buffer.from(token);
+  const b = Buffer.from(AUTH_TOKEN);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }

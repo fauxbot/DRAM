@@ -7,6 +7,13 @@ import type { DramConfig, ProjectConfig, ProjectInfo } from "./types.js";
 const CONFIG_VERSION = 1;
 const DEFAULT_PROJECT = "_default";
 
+export class ProjectNotAllowedError extends Error {
+  constructor(projectId: string) {
+    super(`Project '${projectId}' is not available on this instance`);
+    this.name = "ProjectNotAllowedError";
+  }
+}
+
 export class ProjectManager {
   private rootDir: string;
   private projectsDir: string;
@@ -15,6 +22,7 @@ export class ProjectManager {
   private stores: Map<string, Store> = new Map();
   private embedder: EmbeddingProvider | null = null;
   private legacyDataDir: string | undefined;
+  private allowedProjects: Set<string> | null = null;
 
   constructor(rootDir: string, legacyDataDir?: string) {
     this.rootDir = rootDir;
@@ -35,8 +43,23 @@ export class ProjectManager {
     }
   }
 
+  setProjectAllowlist(projects: string[] | null): void {
+    this.allowedProjects = projects
+      ? new Set(projects.map((p) => this.sanitizeProjectId(p)))
+      : null;
+  }
+
+  isProjectAllowed(project?: string): boolean {
+    if (!this.allowedProjects) return true;
+    const projectId = this.sanitizeProjectId(project || DEFAULT_PROJECT);
+    return this.allowedProjects.has(projectId);
+  }
+
   resolveStore(project?: string): { store: Store; isNew: boolean; projectId: string } {
     const projectId = this.sanitizeProjectId(project || DEFAULT_PROJECT);
+    if (!this.isProjectAllowed(projectId)) {
+      throw new ProjectNotAllowedError(projectId);
+    }
     return this.getOrCreateProject(projectId);
   }
 
@@ -133,6 +156,8 @@ export class ProjectManager {
     const results: ProjectInfo[] = [];
 
     for (const [id, config] of Object.entries(this.config.projects)) {
+      if (!this.isProjectAllowed(id)) continue;
+
       let nodeCount = 0;
       try {
         const nodesDir = path.join(this.projectDataDir(id), "nodes");

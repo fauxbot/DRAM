@@ -1,6 +1,9 @@
-import http from "http";
+import http from "node:http";
+import https from "node:https";
 import { randomUUID } from "node:crypto";
+import type { ServerOptions } from "node:https";
 import type { ProjectManager } from "./project-manager.js";
+import { ProjectNotAllowedError } from "./project-manager.js";
 import { MaintenanceHandler } from "./maintenance.js";
 import { validateBearerToken, isAuthEnabled } from "./auth.js";
 import { createMcpServer } from "./transport.js";
@@ -39,6 +42,61 @@ function readBody(req: http.IncomingMessage): Promise<string> {
     req.on("error", reject);
   });
 }
+
+// --- CORS ---
+
+function parseCorsOrigins(): string[] | "*" | null {
+  const raw = process.env.DRAM_CORS_ORIGINS;
+  if (!raw) return null;
+  if (raw.trim() === "*") return "*";
+  return raw
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+}
+
+const corsOrigins = parseCorsOrigins();
+
+function handleCors(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): boolean {
+  if (!corsOrigins) return false;
+
+  const origin = req.headers.origin;
+  if (!origin) return false;
+
+  const allowed =
+    corsOrigins === "*" ||
+    corsOrigins.includes(origin);
+
+  if (allowed) {
+    res.setHeader(
+      "Access-Control-Allow-Origin",
+      corsOrigins === "*" ? "*" : origin
+    );
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, POST, DELETE, OPTIONS"
+    );
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, Mcp-Session-Id"
+    );
+    res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(allowed ? 204 : 403);
+    res.end();
+    return true;
+  }
+
+  return false;
+}
+
+// --- MCP transport ---
 
 async function handleMcpRequest(
   req: http.IncomingMessage,
@@ -113,18 +171,27 @@ async function handleMcpRequest(
   res.end();
 }
 
+// --- Server factory ---
+
 export interface HttpServerOptions {
   enableMcp?: boolean;
+  tlsOptions?: ServerOptions | null;
 }
 
 export function createHttpServer(
   pm: ProjectManager,
   port: number,
   options?: HttpServerOptions
-): http.Server {
+): http.Server | https.Server {
   const enableMcp = options?.enableMcp ?? false;
+  const tlsOptions = options?.tlsOptions ?? null;
 
-  const server = http.createServer(async (req, res) => {
+  const handler = async (
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ) => {
+    if (handleCors(req, res)) return;
+
     if (!validateBearerToken(req)) {
       sendJson(res, 401, { error: "Unauthorized" });
       return;
@@ -169,7 +236,11 @@ export function createHttpServer(
             timestamp: new Date().toISOString(),
           });
           sendJson(res, 200, { ok: true });
-        } catch {
+        } catch (err) {
+          if (err instanceof ProjectNotAllowedError) {
+            sendJson(res, 403, { error: err.message });
+            return;
+          }
           sendJson(res, 400, { error: "invalid JSON body" });
         }
       });
@@ -177,19 +248,28 @@ export function createHttpServer(
     }
 
     if (req.method === "GET" && url?.startsWith("/scratchpad")) {
-      const parsedUrl = new URL(url, `http://localhost:${port}`);
+      const proto = tlsOptions ? "https" : "http";
+      const parsedUrl = new URL(url, `${proto}://localhost:${port}`);
       const sessionId = parsedUrl.searchParams.get("session_id");
       const project = parsedUrl.searchParams.get("project") || undefined;
       if (!sessionId) {
         sendJson(res, 400, { error: "session_id query parameter required" });
         return;
       }
-      const { store } = pm.resolveStore(project);
-      const content = store.getScratchpad(sessionId);
-      sendJson(res, 200, {
-        session_id: sessionId,
-        scratchpad: content || "",
-      });
+      try {
+        const { store } = pm.resolveStore(project);
+        const content = store.getScratchpad(sessionId);
+        sendJson(res, 200, {
+          session_id: sessionId,
+          scratchpad: content || "",
+        });
+      } catch (err) {
+        if (err instanceof ProjectNotAllowedError) {
+          sendJson(res, 403, { error: err.message });
+          return;
+        }
+        throw err;
+      }
       return;
     }
 
@@ -202,14 +282,22 @@ export function createHttpServer(
       } catch {
         // no body or invalid — use default project
       }
-      const { store } = pm.resolveStore(project);
-      const handler = new MaintenanceHandler(store, store.getDb());
-      handler
-        .run()
-        .then((result) => sendJson(res, 200, result))
-        .catch((err) =>
-          sendJson(res, 500, { error: (err as Error).message })
-        );
+      try {
+        const { store } = pm.resolveStore(project);
+        const handler = new MaintenanceHandler(store, store.getDb());
+        handler
+          .run()
+          .then((result) => sendJson(res, 200, result))
+          .catch((err) =>
+            sendJson(res, 500, { error: (err as Error).message })
+          );
+      } catch (err) {
+        if (err instanceof ProjectNotAllowedError) {
+          sendJson(res, 403, { error: err.message });
+          return;
+        }
+        throw err;
+      }
       return;
     }
 
@@ -218,6 +306,8 @@ export function createHttpServer(
       sendJson(res, 200, {
         status: "ok",
         version: "0.5.0",
+        tls: !!tlsOptions,
+        auth: isAuthEnabled(),
         projects: projects.length,
         projectList: projects.map((p) => ({
           id: p.id,
@@ -234,7 +324,10 @@ export function createHttpServer(
     }
 
     sendJson(res, 404, { error: "not found" });
-  });
+  };
 
-  return server;
+  if (tlsOptions) {
+    return https.createServer(tlsOptions, handler);
+  }
+  return http.createServer(handler);
 }

@@ -121,7 +121,49 @@ before continuing. Re-reading is cheap; acting on stale context is not.
 - `DRAM_TRANSPORT` — transport mode: `stdio` (default), `http` (remote only), `both` (stdio + HTTP MCP)
 - `DRAM_AUTH_TOKEN` — if set, all HTTP requests require `Authorization: Bearer <token>`
 - `DRAM_HTTP_HOST` — bind address (default `127.0.0.1`; set to `0.0.0.0` for remote access)
+- `DRAM_TLS` — TLS mode: `off` (default), `auto` (self-signed), `custom` (user-provided certs)
+- `DRAM_TLS_CERT` — path to PEM certificate file (required when `DRAM_TLS=custom`)
+- `DRAM_TLS_KEY` — path to PEM private key file (required when `DRAM_TLS=custom`)
+- `DRAM_TLS_DIR` — directory for auto-generated certificates (default `~/.dram/certs/`)
+- `DRAM_PROJECTS_ALLOW` — comma-separated project IDs to expose (default: all projects)
+- `DRAM_CORS_ORIGINS` — comma-separated allowed origins, or `*` for all (default: none)
 
 ## Security
 
-DRAM serves plain HTTP. For any non-localhost deployment, place a TLS-terminating reverse proxy (nginx, Caddy, cloud load balancer) in front of the server. The server binds to localhost by default — set `DRAM_HTTP_HOST=0.0.0.0` only behind a proxy or tunnel.
+DRAM supports three TLS configurations:
+
+1. **No TLS** (`DRAM_TLS=off`, default) — plain HTTP, suitable for localhost or behind a reverse proxy.
+2. **Auto TLS** (`DRAM_TLS=auto`) — generates a self-signed certificate on first run, cached in `~/.dram/certs/`. Auto-regenerates when the certificate is within 30 days of expiry. Good for development, internal networks, and testing.
+3. **Custom TLS** (`DRAM_TLS=custom`) — uses your own certificate and key (set `DRAM_TLS_CERT` and `DRAM_TLS_KEY`). Use this with certificates from Let's Encrypt, your internal CA, or any other provider.
+
+For production deployments, either use `DRAM_TLS=custom` with proper certificates or place a TLS-terminating reverse proxy (nginx, Caddy, cloud load balancer) in front of the server with `DRAM_TLS=off`.
+
+The server binds to localhost by default. When binding to all interfaces (`DRAM_HTTP_HOST=0.0.0.0`), the server warns if auth or TLS is not configured.
+
+## Hosted deployment
+
+DRAM can run as a hosted MCP server accessible to remote clients. A typical hosted setup:
+
+```bash
+# Serve all projects over HTTPS with auth
+DRAM_TRANSPORT=http \
+DRAM_HTTP_HOST=0.0.0.0 \
+DRAM_TLS=auto \
+DRAM_AUTH_TOKEN=your-secret-token \
+DRAM_CORS_ORIGINS=* \
+npm start
+
+# Serve a single project with custom certs
+DRAM_TRANSPORT=http \
+DRAM_HTTP_HOST=0.0.0.0 \
+DRAM_TLS=custom \
+DRAM_TLS_CERT=/etc/dram/cert.pem \
+DRAM_TLS_KEY=/etc/dram/key.pem \
+DRAM_AUTH_TOKEN=your-secret-token \
+DRAM_PROJECTS_ALLOW=my-app \
+npm start
+```
+
+**Project scoping:** Set `DRAM_PROJECTS_ALLOW` to a comma-separated list of project IDs to restrict which projects this instance serves. Requests for unlisted projects receive a 403. When omitted, all projects are accessible (suitable for a personal hosted instance). This applies to both HTTP and MCP transports.
+
+**CORS:** Set `DRAM_CORS_ORIGINS` for browser-based MCP clients. Use `*` to allow all origins, or a comma-separated list of specific origins (e.g., `https://app.example.com,https://claude.ai`).
